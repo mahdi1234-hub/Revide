@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 const CEREBRAS_API_KEY = process.env.CEREBRAS_API_KEY || "";
 const CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1";
-const CHAT_MODEL = process.env.CHAT_MODEL || "llama-4-scout-17b-16e-instruct";
+const CHAT_MODEL = process.env.CHAT_MODEL || "llama3.1-8b";
 
 export async function POST(req: NextRequest) {
   try {

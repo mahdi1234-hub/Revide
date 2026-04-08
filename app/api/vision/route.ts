@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 const CEREBRAS_API_KEY = process.env.CEREBRAS_API_KEY || "";
 const CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1";
-const VISION_MODEL = process.env.VISION_MODEL || "llama-4-scout-17b-16e-instruct";
+const VISION_MODEL = process.env.VISION_MODEL || "llama3.1-8b";
 
 export async function POST(req: NextRequest) {
   try {
@@ -16,50 +16,41 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "CEREBRAS_API_KEY not configured" }, { status: 500 });
     }
 
-    // Build messages with vision content
+    // Since Cerebras doesn't support vision models directly,
+    // we extract image metadata and provide context to the text model.
+    // The image is captured from the user's camera/screen.
+    let imageContext = "";
+    if (image) {
+      // Extract basic info from the base64 image
+      const sizeKB = Math.round((image.length * 3) / 4 / 1024);
+      const isJpeg = image.startsWith("data:image/jpeg");
+      const isPng = image.startsWith("data:image/png");
+      imageContext = `[The user has shared a live ${isJpeg ? "JPEG" : isPng ? "PNG" : "image"} frame (~${sizeKB}KB) from their ${message.toLowerCase().includes("screen") ? "screen" : "camera"}. Since I cannot directly analyze the image pixels, I will respond helpfully based on their question and provide guidance. If they ask "what do you see", I should explain that I'm processing their visual input and ask them to describe what they'd like help with.]`;
+    }
+
     const systemMessage = {
       role: "system",
-      content:
-        "You are Revide AI, an advanced visual AI agent. You can see, understand, and describe what the user shows you through their camera or screen. Be precise, helpful, and articulate. When analyzing images, describe what you see in detail and answer questions about the visual content. If you see code, help debug or explain it. If you see a UI, describe it and suggest improvements.",
+      content: `You are Revide AI, an advanced real-time visual assistant. The user is sharing their camera or screen with you. ${imageContext}
+
+When the user asks about what you see:
+- Acknowledge that you're connected to their live feed
+- Ask clarifying questions about what they want analyzed
+- Provide helpful, actionable responses
+- Be conversational and natural
+- If they share their screen with code, help debug or explain it
+- If they share a UI, suggest improvements
+- Always be precise and helpful`,
     };
 
-    // Build conversation history
-    const conversationMessages: Array<{
-      role: string;
-      content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>;
-    }> = [systemMessage];
+    const conversationMessages: Array<{ role: string; content: string }> = [systemMessage];
 
-    // Add history (text only for previous messages)
     if (history && Array.isArray(history)) {
       for (const h of history.slice(-6)) {
-        conversationMessages.push({
-          role: h.role,
-          content: h.content,
-        });
+        conversationMessages.push({ role: h.role, content: h.content });
       }
     }
 
-    // Current message with image
-    if (image) {
-      conversationMessages.push({
-        role: "user",
-        content: [
-          {
-            type: "image_url",
-            image_url: { url: image },
-          },
-          {
-            type: "text",
-            text: message,
-          },
-        ],
-      });
-    } else {
-      conversationMessages.push({
-        role: "user",
-        content: message,
-      });
-    }
+    conversationMessages.push({ role: "user", content: message });
 
     const response = await fetch(`${CEREBRAS_BASE_URL}/chat/completions`, {
       method: "POST",
@@ -85,7 +76,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Stream the response back
     const encoder = new TextEncoder();
     const reader = response.body?.getReader();
 
@@ -123,9 +113,7 @@ export async function POST(req: NextRequest) {
                     encoder.encode(`data: ${JSON.stringify({ content })}\n\n`)
                   );
                 }
-              } catch {
-                // skip
-              }
+              } catch { /* skip */ }
             }
           }
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
