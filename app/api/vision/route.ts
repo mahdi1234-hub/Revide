@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const CEREBRAS_API_KEY = process.env.CEREBRAS_API_KEY || "";
-const CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1";
-const VISION_MODEL = process.env.VISION_MODEL || "llama3.1-8b";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const GEMINI_MODEL = "gemini-2.0-flash";
 
 export async function POST(req: NextRequest) {
   try {
@@ -11,71 +10,76 @@ export async function POST(req: NextRequest) {
     if (!message) {
       return NextResponse.json({ error: "message is required" }, { status: 400 });
     }
-
-    if (!CEREBRAS_API_KEY) {
-      return NextResponse.json({ error: "CEREBRAS_API_KEY not configured" }, { status: 500 });
+    if (!GEMINI_API_KEY) {
+      return NextResponse.json({ error: "GEMINI_API_KEY not configured" }, { status: 500 });
     }
 
-    // Since Cerebras doesn't support vision models directly,
-    // we extract image metadata and provide context to the text model.
-    // The image is captured from the user's camera/screen.
-    let imageContext = "";
-    if (image) {
-      // Extract basic info from the base64 image
-      const sizeKB = Math.round((image.length * 3) / 4 / 1024);
-      const isJpeg = image.startsWith("data:image/jpeg");
-      const isPng = image.startsWith("data:image/png");
-      imageContext = `[The user has shared a live ${isJpeg ? "JPEG" : isPng ? "PNG" : "image"} frame (~${sizeKB}KB) from their ${message.toLowerCase().includes("screen") ? "screen" : "camera"}. Since I cannot directly analyze the image pixels, I will respond helpfully based on their question and provide guidance. If they ask "what do you see", I should explain that I'm processing their visual input and ask them to describe what they'd like help with.]`;
-    }
+    // Build Gemini request with vision
+    const contents: Array<{
+      role: string;
+      parts: Array<{ text?: string; inline_data?: { mime_type: string; data: string } }>;
+    }> = [];
 
-    const systemMessage = {
-      role: "system",
-      content: `You are Revide AI, an advanced real-time visual assistant. The user is sharing their camera or screen with you. ${imageContext}
-
-When the user asks about what you see:
-- Acknowledge that you're connected to their live feed
-- Ask clarifying questions about what they want analyzed
-- Provide helpful, actionable responses
-- Be conversational and natural
-- If they share their screen with code, help debug or explain it
-- If they share a UI, suggest improvements
-- Always be precise and helpful`,
-    };
-
-    const conversationMessages: Array<{ role: string; content: string }> = [systemMessage];
-
+    // Add history
     if (history && Array.isArray(history)) {
       for (const h of history.slice(-6)) {
-        conversationMessages.push({ role: h.role, content: h.content });
+        contents.push({
+          role: h.role === "assistant" ? "model" : "user",
+          parts: [{ text: h.content }],
+        });
       }
     }
 
-    conversationMessages.push({ role: "user", content: message });
+    // Current message with image
+    const parts: Array<{ text?: string; inline_data?: { mime_type: string; data: string } }> = [];
 
-    const response = await fetch(`${CEREBRAS_BASE_URL}/chat/completions`, {
+    if (image) {
+      // Extract base64 data from data URL
+      const base64Match = image.match(/^data:image\/(.*?);base64,(.*)$/);
+      if (base64Match) {
+        parts.push({
+          inline_data: {
+            mime_type: `image/${base64Match[1]}`,
+            data: base64Match[2],
+          },
+        });
+      }
+    }
+
+    parts.push({ text: message });
+    contents.push({ role: "user", parts });
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse&key=${GEMINI_API_KEY}`;
+
+    const response = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${CEREBRAS_API_KEY}`,
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: VISION_MODEL,
-        messages: conversationMessages,
-        stream: true,
-        max_tokens: 2048,
-        temperature: 0.7,
+        contents,
+        systemInstruction: {
+          parts: [
+            {
+              text: "You are Revide AI, a real-time visual assistant. The user is sharing their camera or screen with you and speaking via voice. You can see their live video feed. Describe what you see precisely and helpfully. Be concise and conversational since your responses will be spoken aloud. Keep responses under 3 sentences unless asked for detail.",
+            },
+          ],
+        },
+        generationConfig: {
+          temperature: 0.7,
+          maxOutputTokens: 512,
+        },
       }),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error("Cerebras vision error:", errorText);
+      console.error("Gemini error:", errorText);
       return NextResponse.json(
-        { error: `Vision API error: ${response.status} - ${errorText}` },
+        { error: `Gemini error: ${response.status}` },
         { status: response.status }
       );
     }
 
+    // Stream SSE response
     const encoder = new TextEncoder();
     const reader = response.body?.getReader();
 
@@ -99,18 +103,16 @@ When the user asks about what you see:
 
             for (const line of lines) {
               const trimmed = line.trim();
-              if (!trimmed || !trimmed.startsWith("data: ")) continue;
+              if (!trimmed.startsWith("data: ")) continue;
               const data = trimmed.slice(6);
-              if (data === "[DONE]") {
-                controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-                break;
-              }
+              if (data === "[DONE]") break;
+
               try {
                 const parsed = JSON.parse(data);
-                const content = parsed.choices?.[0]?.delta?.content;
-                if (content) {
+                const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (text) {
                   controller.enqueue(
-                    encoder.encode(`data: ${JSON.stringify({ content })}\n\n`)
+                    encoder.encode(`data: ${JSON.stringify({ content: text })}\n\n`)
                   );
                 }
               } catch { /* skip */ }
