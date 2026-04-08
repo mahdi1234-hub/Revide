@@ -44,6 +44,13 @@ export default function Home() {
     };
   }, []);
 
+  // Attach stream to video element after render
+  useEffect(() => {
+    if (videoRef.current && streamRef.current && isStreaming) {
+      videoRef.current.srcObject = streamRef.current;
+    }
+  }, [isStreaming]);
+
   // TTS
   const speak = useCallback((text: string): Promise<void> => {
     return new Promise((resolve) => {
@@ -235,7 +242,8 @@ export default function Home() {
         }}
       />
 
-      {/* Hidden canvas for frame capture */}
+      {/* Hidden video + canvas for frame capture (always in DOM) */}
+      <video ref={videoRef} autoPlay playsInline muted className="hidden" />
       <canvas ref={canvasRef} className="hidden" />
 
       {/* UI Overlay */}
@@ -273,8 +281,8 @@ export default function Home() {
           {isStreaming && (
             <div className="absolute top-20 right-6 w-40 md:w-52 aspect-video rounded-2xl overflow-hidden border border-white/15 shadow-2xl">
               <video
-                ref={videoRef}
                 autoPlay playsInline muted
+                ref={(el) => { if (el && streamRef.current) el.srcObject = streamRef.current; }}
                 className={`w-full h-full object-cover ${source === "camera" ? "video-feed" : ""}`}
               />
             </div>
